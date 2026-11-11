@@ -12,8 +12,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.*;
 import com.google.firebase.auth.FirebaseAuth;
-import com.google.firebase.functions.FirebaseFunctions;
-import com.google.firebase.functions.FirebaseFunctionsException;
+import com.google.firebase.database.*;
 import java.util.*;
 
 public class MainActivity extends Activity {
@@ -21,7 +20,7 @@ public class MainActivity extends Activity {
     private final int PANEL = Color.rgb(22, 22, 30);
     private final int RED = Color.rgb(255, 48, 79);
     private FirebaseAuth auth;
-    private FirebaseFunctions functions;
+    private DatabaseReference db;
     private String deviceId, role = "MEMBER", userKey = "";
     private LinearLayout root, body;
     private EditText keyInput;
@@ -33,7 +32,7 @@ public class MainActivity extends Activity {
         deviceId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
         if (deviceId == null) deviceId = "unknown-device";
         auth = FirebaseAuth.getInstance();
-        functions = FirebaseFunctions.getInstance("us-central1");
+        db = FirebaseDatabase.getInstance().getReference();
         showLoading();
         auth.signInAnonymously().addOnSuccessListener(result -> restoreSession())
             .addOnFailureListener(e -> showError("Firebase Auth gagal: " + e.getMessage()));
@@ -58,18 +57,26 @@ public class MainActivity extends Activity {
     }
 
     private void restoreSession() {
-        Map<String,Object> data = new HashMap<>();
-        data.put("deviceId", deviceId);
-        functions.getHttpsCallable("getProfile").call(data)
-            .addOnSuccessListener(r -> {
-                Map<?,?> p = (Map<?,?>) r.getData();
-                if (p != null && Boolean.TRUE.equals(p.get("active"))) {
+        String uid = auth.getCurrentUser() != null ? auth.getCurrentUser().getUid() : null;
+        if (uid == null) { showLogin(); return; }
+        db.child("users").child(uid).addListenerForSingleValueEvent(new ValueEventListener() {
+            @Override public void onDataChange(DataSnapshot snap) {
+                if (!snap.exists()) { showLogin(); return; }
+                Map<?,?> p = (Map<?,?>) snap.getValue();
+                if (p != null && Boolean.TRUE.equals(p.get("active")) && deviceId.equals(String.valueOf(p.get("deviceId")))) {
+                    Object exp = p.get("expiresAt");
+                    if (exp != null && !exp.equals(0L) && System.currentTimeMillis() > ((Number)exp).longValue()) {
+                        db.child("users").child(uid).child("active").setValue(false);
+                        showLogin();
+                        return;
+                    }
                     role = String.valueOf(p.get("role"));
                     userKey = String.valueOf(p.get("key"));
                     showDashboard("HOME");
                 } else showLogin();
-            })
-            .addOnFailureListener(e -> showLogin());
+            }
+            @Override public void onCancelled(DatabaseError error) { showLogin(); }
+        });
     }
 
     private void showLogin() {
@@ -108,26 +115,80 @@ public class MainActivity extends Activity {
     private void redeemKey(String key) {
         if (key.isEmpty()) { toast("Masukkan Access Key"); return; }
         setBusy(true);
-        Map<String,Object> data = new HashMap<>();
-        data.put("key", key.toUpperCase(Locale.US));
-        data.put("deviceId", deviceId);
-        functions.getHttpsCallable("redeemKey").call(data)
-            .addOnSuccessListener(r -> {
+        String upperKey = key.toUpperCase(Locale.US);
+        if (!upperKey.matches("^[A-Z0-9]{4}-[A-Z0-9]{5}-[A-Z0-9]{4}$")) {
+            setBusy(false);
+            toast("Format key salah. Harus XXXX-XXXXX-XXXX");
+            return;
+        }
+        String uid = auth.getCurrentUser().getUid();
+        DatabaseReference keyRef = db.child("keys").child(upperKey);
+        keyRef.addListenerForSingleValueEvent(new ValueEventListener() {
+            @Override public void onDataChange(DataSnapshot snap) {
+                if (!snap.exists()) {
+                    setBusy(false);
+                    toast("Key tidak ditemukan.");
+                    return;
+                }
+                Map<String,Object> rec = (Map<String,Object>) snap.getValue();
+                if (rec == null || !Boolean.TRUE.equals(rec.get("active"))) {
+                    setBusy(false);
+                    toast("Key tidak aktif.");
+                    return;
+                }
+                Object exp = rec.get("expiresAt");
+                if (exp != null && !exp.equals(0) && System.currentTimeMillis() > ((Number)exp).longValue()) {
+                    setBusy(false);
+                    toast("Key sudah expired.");
+                    return;
+                }
+                String boundUid = rec.get("boundUid") != null ? String.valueOf(rec.get("boundUid")) : null;
+                String boundDevice = rec.get("deviceId") != null ? String.valueOf(rec.get("deviceId")) : null;
+                if (boundUid != null && !(boundUid.equals(uid) && boundDevice.equals(deviceId))) {
+                    setBusy(false);
+                    toast("Key sudah terikat ke perangkat lain.");
+                    return;
+                }
+                // Bind key
+                Map<String,Object> updates = new HashMap<>();
+                updates.put("used", true);
+                updates.put("boundUid", uid);
+                updates.put("deviceId", deviceId);
+                updates.put("boundAt", ServerValue.TIMESTAMP);
+                keyRef.updateChildren(updates).addOnSuccessListener(aVoid -> {
+                    // Set user profile
+                    Map<String,Object> profile = new HashMap<>();
+                    profile.put("role", rec.get("role"));
+                    profile.put("key", upperKey);
+                    profile.put("deviceId", deviceId);
+                    profile.put("active", true);
+                    profile.put("createdAt", ServerValue.TIMESTAMP);
+                    profile.put("expiresAt", rec.get("expiresAt"));
+                    db.child("users").child(uid).setValue(profile).addOnSuccessListener(aVoid2 -> {
+                        setBusy(false);
+                        role = String.valueOf(rec.get("role"));
+                        userKey = upperKey;
+                        toast("Login berhasil!");
+                        showDashboard("HOME");
+                    }).addOnFailureListener(e -> {
+                        setBusy(false);
+                        toast("Gagal simpan profile: " + e.getMessage());
+                    });
+                }).addOnFailureListener(e -> {
+                    setBusy(false);
+                    toast("Gagal bind key: " + e.getMessage());
+                });
+            }
+            @Override public void onCancelled(DatabaseError error) {
                 setBusy(false);
-                Map<?,?> p = (Map<?,?>) r.getData();
-                role = String.valueOf(p.get("role"));
-                userKey = key.toUpperCase(Locale.US);
-                showDashboard("HOME");
-            })
-            .addOnFailureListener(e -> {
-                setBusy(false);
-                toast(friendly(e));
-            });
+                toast("Error database: " + error.getMessage());
+            }
+        });
     }
 
     private void setBusy(boolean busy) {
         if (keyInput != null) keyInput.setEnabled(!busy);
-        toast(busy ? "Memverifikasi key..." : "Selesai");
+        if (busy) toast("Memverifikasi key...");
     }
 
     private void showDashboard(String page) {
@@ -191,11 +252,7 @@ public class MainActivity extends Activity {
         }
         Button logout = button("LOG OUT", false);
         body.addView(logout, lp(-1, 48));
-        logout.setOnClickListener(v -> {
-            // Keep the same anonymous Firebase UID so the same device can redeem
-            // its already-bound key again after logging out.
-            showLogin();
-        });
+        logout.setOnClickListener(v -> showLogin());
     }
 
     private void generatePage() {
@@ -206,6 +263,20 @@ public class MainActivity extends Activity {
         String[] choices = {"MEMBER", "OWNER"};
         roles.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, choices));
         body.addView(roles, lp(-1, 48));
+        space(body, 8);
+        TextView durLabel = text("Durasi (hari, 0 = unlimited):", 12, Color.LTGRAY, false);
+        body.addView(durLabel, lp(-1, 28));
+        EditText durationInput = new EditText(this);
+        durationInput.setSingleLine(true);
+        durationInput.setHint("30");
+        durationInput.setHintTextColor(Color.GRAY);
+        durationInput.setTextColor(Color.WHITE);
+        durationInput.setTextSize(14);
+        durationInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        durationInput.setPadding(dp(15), 0, dp(15), 0);
+        durationInput.setBackground(round(PANEL, 12, Color.rgb(60,60,70)));
+        body.addView(durationInput, lp(-1, 48));
+        space(body, 10);
         Button create = button("GENERATE KEY", true);
         body.addView(create, lp(-1, 52));
         TextView result = text("KEY RESULT WILL APPEAR HERE", 14, RED, true);
@@ -215,15 +286,30 @@ public class MainActivity extends Activity {
         body.addView(copy, lp(-1, 46));
         final String[] generated = {""};
         create.setOnClickListener(v -> {
-            Map<String,Object> data = new HashMap<>();
-            data.put("role", roles.getSelectedItem().toString());
-            functions.getHttpsCallable("generateKey").call(data)
-                .addOnSuccessListener(r -> {
-                    Map<?,?> m = (Map<?,?>) r.getData();
-                    generated[0] = String.valueOf(m.get("key"));
-                    result.setText(generated[0]);
-                })
-                .addOnFailureListener(e -> toast(friendly(e)));
+            String roleSel = roles.getSelectedItem().toString();
+            String durText = durationInput.getText().toString().trim();
+            int durationDays = 0;
+            try { if (!durText.isEmpty()) durationDays = Integer.parseInt(durText); } catch (Exception ignored) {}
+            if (durationDays < 0) durationDays = 0;
+            long expiresAt = durationDays > 0 ? System.currentTimeMillis() + durationDays * 86400000L : 0L;
+
+            String newKey = generateRandomKey();
+            String uid = auth.getCurrentUser().getUid();
+            Map<String,Object> keyData = new HashMap<>();
+            keyData.put("role", roleSel);
+            keyData.put("active", true);
+            keyData.put("used", false);
+            keyData.put("createdBy", uid);
+            keyData.put("createdAt", ServerValue.TIMESTAMP);
+            keyData.put("expiresAt", expiresAt);
+            keyData.put("durationDays", durationDays);
+
+            db.child("keys").child(newKey).setValue(keyData).addOnSuccessListener(aVoid -> {
+                generated[0] = newKey;
+                String extra = expiresAt > 0 ? "\nExpired: " + new Date(expiresAt) : "\nUnlimited";
+                result.setText(newKey + extra);
+                toast("Key berhasil digenerate!");
+            }).addOnFailureListener(e -> toast("Gagal generate: " + e.getMessage()));
         });
         copy.setOnClickListener(v -> {
             if (generated[0].isEmpty()) { toast("Generate key dahulu"); return; }
@@ -231,6 +317,14 @@ public class MainActivity extends Activity {
             cm.setPrimaryClip(android.content.ClipData.newPlainText("XIT VOID KEY", generated[0]));
             toast("Key disalin");
         });
+    }
+
+    private String generateRandomKey() {
+        String alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        Random rnd = new Random();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 13; i++) sb.append(alphabet.charAt(rnd.nextInt(alphabet.length())));
+        return sb.substring(0,4) + "-" + sb.substring(4,9) + "-" + sb.substring(9,13);
     }
 
     private void addBrand() {
@@ -334,14 +428,6 @@ public class MainActivity extends Activity {
         Button retry = button("RETRY", true); root.addView(retry, lp(-1, 50));
         retry.setOnClickListener(v -> auth.signInAnonymously().addOnSuccessListener(x -> restoreSession()).addOnFailureListener(e -> showError(e.getMessage())));
     }
-    private String friendly(Exception e) {
-        if (e instanceof FirebaseFunctionsException) {
-            FirebaseFunctionsException f = (FirebaseFunctionsException)e;
-            if (f.getCode() == FirebaseFunctionsException.Code.PERMISSION_DENIED) return "Key tidak valid, sudah dipakai, atau akses ditolak.";
-            return "Server: " + f.getMessage();
-        }
-        return "Koneksi gagal: " + e.getMessage();
-    }
     private String mask(String s) {
         if (s == null || s.length() < 5) return "••••••••";
         return s.substring(0, 4) + "-•••••-••••";
@@ -363,5 +449,4 @@ public class MainActivity extends Activity {
     private String formatBytes(long n) {
         return String.format(Locale.US, "%.1f KB", n / 1024.0);
     }
-  }
-          
+}
