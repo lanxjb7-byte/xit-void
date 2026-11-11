@@ -1,6 +1,24 @@
 {
   "rules": {
-    ".read": false,
-    ".write": false
+    "keys": {
+      "$key": {
+        ".read": "auth != null",
+        ".write": "auth != null && (
+          !data.exists() || 
+          (data.child('boundUid').val() == null && newData.child('boundUid').val() == auth.uid) ||
+          (data.child('boundUid').val() == auth.uid && data.child('deviceId').val() == newData.child('deviceId').val())
+        )",
+        ".validate": "newData.hasChildren(['role','active']) && 
+                     newData.child('role').val().matches(/MEMBER|OWNER/) &&
+                     newData.child('active').isBoolean()"
+      }
+    },
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid",
+        ".validate": "newData.hasChildren(['role','key','deviceId','active'])"
+      }
+    }
   }
 }
