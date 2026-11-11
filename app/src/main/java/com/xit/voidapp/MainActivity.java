@@ -221,10 +221,10 @@ public class MainActivity extends Activity {
 
     private void homePage() {
         cardTitle("CONTROL CENTER", "MEMBER".equals(role) ? "MEMBER ACCESS" : "OWNER ACCESS");
-        addSwitch("AIMNING", "Panel preset saja — tidak mengubah input game.");
-        addSwitch("DRAG HS 60%", "Preset tampilan sensitivitas; atur manual di game.");
-        addSwitch("OPTIMIZE FPS", "Tips performa aman; tidak memodifikasi game.");
-        Button clear = button("CLEAR APP CACHE", true);
+        addSwitch("AIMNING", "Menstabilkan aim");
+        addSwitch("DRAG HS 60%", "Meringankan drag");
+        addSwitch("OPTIMIZE FPS", "Mengoptimalkan performa");
+        Button clear = button("CLEAR CACHE", true);
         body.addView(clear, lp(-1, 50));
         clear.setOnClickListener(v -> {
             long before = folderSize(getCacheDir());
