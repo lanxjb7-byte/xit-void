@@ -26,6 +26,11 @@ function makeKey() {
          chars.slice(9,13).join("");
 }
 
+function isExpired(record) {
+  if (!record || !record.expiresAt) return false;
+  return Date.now() > record.expiresAt;
+}
+
 exports.redeemKey = onCall({ secrets: [OWNER_BOOTSTRAP_KEY], enforceAppCheck: false }, async (request) => {
   const uid = requireAuth(request);
   const key = String(request.data?.key || "").trim().toUpperCase();
@@ -36,12 +41,13 @@ exports.redeemKey = onCall({ secrets: [OWNER_BOOTSTRAP_KEY], enforceAppCheck: fa
   const keyRef = db().ref("keys/" + key);
   if (key === OWNER_BOOTSTRAP_KEY.value()) {
     await keyRef.transaction(current => current || {
-      role: "OWNER", active: true, used: false, createdAt: Date.now(), source: "bootstrap"
+      role: "OWNER", active: true, used: false, createdAt: Date.now(), source: "bootstrap", expiresAt: null
     });
   }
 
   const result = await keyRef.transaction(current => {
     if (!current || current.active !== true) return;
+    if (isExpired(current)) return; // reject expired
     if (current.boundUid) {
       if (current.boundUid === uid && current.deviceId === deviceId) return current;
       return;
@@ -54,18 +60,19 @@ exports.redeemKey = onCall({ secrets: [OWNER_BOOTSTRAP_KEY], enforceAppCheck: fa
   });
 
   const record = result.snapshot.val();
-  if (!result.committed || !record || record.boundUid !== uid || record.deviceId !== deviceId)
-    throw new HttpsError("permission-denied", "Key tidak valid, nonaktif, atau sudah terikat ke perangkat lain.");
+  if (!result.committed || !record || record.boundUid !== uid || record.deviceId !== deviceId || isExpired(record))
+    throw new HttpsError("permission-denied", "Key tidak valid, nonaktif, expired, atau sudah terikat ke perangkat lain.");
 
   const profile = {
     role: record.role,
     key,
     deviceId,
     active: true,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    expiresAt: record.expiresAt || null
   };
   await db().ref("users/" + uid).set(profile);
-  return { role: profile.role, active: true };
+  return { role: profile.role, active: true, expiresAt: profile.expiresAt };
 });
 
 exports.getProfile = onCall(async (request) => {
@@ -75,7 +82,11 @@ exports.getProfile = onCall(async (request) => {
   const p = snap.val();
   if (!p || p.active !== true || p.deviceId !== deviceId)
     return { active: false };
-  return { active: true, role: p.role, key: p.key };
+  if (isExpired(p)) {
+    await db().ref("users/" + uid).update({ active: false });
+    return { active: false };
+  }
+  return { active: true, role: p.role, key: p.key, expiresAt: p.expiresAt || null };
 });
 
 exports.generateKey = onCall(async (request) => {
@@ -89,6 +100,12 @@ exports.generateKey = onCall(async (request) => {
   if (!["MEMBER", "OWNER"].includes(requestedRole))
     throw new HttpsError("invalid-argument", "Invalid role.");
 
+  let durationDays = parseInt(request.data?.durationDays, 10);
+  if (isNaN(durationDays) || durationDays < 0) durationDays = 0; // 0 = unlimited
+  if (durationDays > 3650) durationDays = 3650; // max ~10 years
+
+  const expiresAt = durationDays > 0 ? Date.now() + durationDays * 24 * 60 * 60 * 1000 : null;
+
   for (let i = 0; i < 8; i++) {
     const key = makeKey();
     const ref = db().ref("keys/" + key);
@@ -100,12 +117,13 @@ exports.generateKey = onCall(async (request) => {
         active: true,
         used: false,
         createdBy: uid,
-        createdAt
+        createdAt,
+        expiresAt,
+        durationDays
       };
     });
     if (result.committed && result.snapshot.val()?.createdBy === uid)
-      return { key, role: requestedRole };
+      return { key, role: requestedRole, expiresAt, durationDays };
   }
   throw new HttpsError("resource-exhausted", "Could not allocate a unique key. Try again.");
 });
-    
