@@ -3,21 +3,14 @@
     "keys": {
       "$key": {
         ".read": "auth != null",
-        ".write": "auth != null && (
-          !data.exists() || 
-          (data.child('boundUid').val() == null && newData.child('boundUid').val() == auth.uid) ||
-          (data.child('boundUid').val() == auth.uid && data.child('deviceId').val() == newData.child('deviceId').val())
-        )",
-        ".validate": "newData.hasChildren(['role','active']) && 
-                     newData.child('role').val().matches(/MEMBER|OWNER/) &&
-                     newData.child('active').isBoolean()"
+        ".write": "auth != null",
+        ".validate": "newData.hasChildren(['role','active']) || !newData.exists()"
       }
     },
     "users": {
       "$uid": {
         ".read": "auth != null && auth.uid == $uid",
-        ".write": "auth != null && auth.uid == $uid",
-        ".validate": "newData.hasChildren(['role','key','deviceId','active'])"
+        ".write": "auth != null && auth.uid == $uid"
       }
     }
   }
